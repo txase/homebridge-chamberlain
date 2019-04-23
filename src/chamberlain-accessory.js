@@ -32,6 +32,8 @@ module.exports = class {
     };
 
     this.hapToEnglish = {
+      false: 'not obstructed',
+      true: 'obstructed',
       [CurrentDoorState.OPEN]: 'open',
       [CurrentDoorState.CLOSED]: 'closed',
       [CurrentDoorState.OPENING]: 'opening',
@@ -57,21 +59,30 @@ module.exports = class {
         service
           .getCharacteristic(Characteristic.TargetDoorState)
           .on('set', this.setTargetDoorState.bind(this))
-          .on('change', this.logChange.bind(this, 'desireddoorstate'))
+          .on('change', this.logChange.bind(this, 'desireddoorstate')),
+      closeerrorstate:
+        service
+          .getCharacteristic(Characteristic.ObstructionDetected)
+          .on('get', this.getCloseErrorState.bind(this))
+          .on('change', this.logChange.bind(this, 'closeerrorstate'))
     };
 
     this.states.doorstate.value = CurrentDoorState.CLOSED;
     this.states.desireddoorstate.value = TargetDoorState.CLOSED;
+    this.states.closeerrorstate.value = false;
 
     (this.poll = this.poll.bind(this))();
   }
 
   poll() {
     clearTimeout(this.pollTimeoutId);
-    const {doorstate, desireddoorstate} = this.states;
-    return new Promise((resolve, reject) =>
-      doorstate.getValue(er => er ? reject(er) : resolve())
-    ).then(() =>
+    const {doorstate, desireddoorstate, closeerrorstate} = this.states;
+    return Promise.all([
+      new Promise((resolve, reject) =>
+        doorstate.getValue(er => er ? reject(er) : resolve())),
+      new Promise((resolve, reject) =>
+        closeerrorstate.getValue(er => er ? reject(er) : resolve()))
+    ]).then(() =>
       doorstate.value !== desireddoorstate.value ? ACTIVE_DELAY : IDLE_DELAY
     ).catch(_.noop).then((delay = IDLE_DELAY) => {
       clearTimeout(this.pollTimeoutId);
@@ -118,6 +129,14 @@ module.exports = class {
   setTargetDoorState(value, cb) {
     if (this.reactiveSetTargetDoorState) return cb();
 
+    this.log.info(`Setting door desired door state to ${value}`);
+
+    if (this.states.closeerrorstate.value) {
+      this.log.error('Cannot close door because it is obstructed');
+      cb(new Error('Cannot close door because it is obstructed'));
+      return;
+    }
+
     value = this.hapToApi[value];
     this.targetDoorState = value;
 
@@ -126,6 +145,14 @@ module.exports = class {
         this.poll();
         this.targetDoorState = null;
         cb();
+      })
+      .catch(this.getErrorHandler(cb));
+  }
+
+  getCloseErrorState(cb) {
+    return this.api.getDeviceAttribute({name: 'isunattendedcloseallowed'})
+      .then(value => {
+        cb(null, value === '0');
       })
       .catch(this.getErrorHandler(cb));
   }

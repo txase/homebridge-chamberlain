@@ -7,7 +7,7 @@ const MyQApplicationId =
 const protocol = 'https:';
 const host = 'myqexternal.myqdevice.com';
 
-const GATEWAY_ID = 1;
+const GATEWAY_TYPE_IDS = [1, 15];
 
 const req = ({body, headers, method, pathname, query}) =>
   fetch(url.format({host, pathname, protocol, query}), {
@@ -59,24 +59,26 @@ module.exports = class {
     ).then(({Devices}) => Devices);
   }
 
+  findDeviceId(devices) {
+    const withoutGateways = devices.filter(device => !GATEWAY_TYPE_IDS.includes(device.MyQDeviceTypeId));
+    const ids = withoutGateways.map(device => device.MyQDeviceId)
+    const {0: MyQDeviceId, length} = ids;
+    if (length === 0) throw new Error('No controllable devices found');
+
+    if (length === 1) {
+      this.options = _.extend({}, this.options, {MyQDeviceId});
+      return MyQDeviceId;
+    }
+
+    throw new Error(`Multiple controllable devices found: ${ids.join(', ')}`);
+  }
+
   getDeviceId(options = {}) {
     options = _.extend({}, this.options, options);
     const {MyQDeviceId} = options;
     if (MyQDeviceId) return Promise.resolve(MyQDeviceId);
 
-    return this.getDeviceList(options).then(devices => {
-      const withoutGateways = _.reject(devices, {MyQDeviceTypeId: GATEWAY_ID});
-      const ids = _.map(withoutGateways, 'MyQDeviceId');
-      const {0: MyQDeviceId, length} = ids;
-      if (length === 0) throw new Error('No controllable devices found');
-
-      if (length === 1) {
-        this.options = _.extend({}, this.options, {MyQDeviceId});
-        return MyQDeviceId;
-      }
-
-      throw new Error(`Multiple controllable devices found: ${ids.join(', ')}`);
-    });
+    return this.getDeviceList(options).then(devices => findDeviceId(devices));
   }
 
   maybeRetry(fn) {
@@ -100,17 +102,25 @@ module.exports = class {
   }
 
   getDeviceAttribute(options = {}) {
+    options = _.extend({}, this.options, options);
     const {name: AttributeName} = options;
     return this.maybeRetry(() =>
-      this.getSecurityTokenAndMyQDeviceId(options).then(
-        ({SecurityToken, MyQDeviceId}) =>
-          req({
-            method: 'GET',
-            pathname: '/api/v4/DeviceAttribute/GetDeviceAttribute',
-            headers: {SecurityToken},
-            query: {AttributeName, MyQDeviceId}
-          }).then(({AttributeValue}) => AttributeValue)
-      )
+      this.getDeviceList(options)
+        .then(devices => {
+          let deviceId;
+
+          if (options.MyQDeviceId) {
+            deviceId = Number(options.MyQDeviceId);
+          } else {
+            deviceId = this.findDeviceId(devices);
+          }
+
+          const device = devices.find(device => device.MyQDeviceId === deviceId);
+
+          const attribute = device.Attributes.find(attribute => attribute.AttributeDisplayName === AttributeName);
+
+          return attribute.Value;
+        })
     );
   }
 
@@ -118,13 +128,14 @@ module.exports = class {
     const {name: AttributeName, value: AttributeValue} = options;
     return this.maybeRetry(() =>
       this.getSecurityTokenAndMyQDeviceId(options).then(
-        ({SecurityToken, MyQDeviceId}) =>
-          req({
+        ({SecurityToken, MyQDeviceId}) => {
+          return req({
             method: 'PUT',
             pathname: '/api/v4/DeviceAttribute/PutDeviceAttribute',
             headers: {SecurityToken},
             body: {AttributeName, AttributeValue, MyQDeviceId}
           })
+        }
       )
     );
   }
